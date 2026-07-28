@@ -1,0 +1,5 @@
+customtkinter==5.2.2
+supabase==2.10.0
+python-dotenv==1.0.1
+pyinstaller==6.11.1
+winotify==1.1.0
