@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import sys
 from datetime import datetime
 from typing import Any
 
@@ -189,6 +190,9 @@ def format_timestamp(value: datetime | None = None) -> str:
 
 
 def send_windows_notification(title: str, message: str) -> None:
+    if sys.platform != "win32":
+        logger.debug("Windows notification skipped on non-Windows platform")
+        return
     try:
         from winotify import Notification
 

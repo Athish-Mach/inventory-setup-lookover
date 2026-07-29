@@ -166,6 +166,15 @@ class CiscoAdvisoryApp(ctk.CTk):
         )
         heading.grid(row=0, column=0, sticky="w")
 
+        self.add_advisory_button = ctk.CTkButton(
+            header,
+            text="+ Add Advisory",
+            width=130,
+            height=34,
+            command=self._open_advisory_form,
+        )
+        self.add_advisory_button.grid(row=0, column=1, sticky="e")
+
         self.search_entry = ctk.CTkEntry(
             self.main,
             placeholder_text="Search by product, summary, or name",
@@ -644,7 +653,7 @@ class CiscoAdvisoryApp(ctk.CTk):
                 text_color="#93c5fd",
                 anchor="w",
             )
-            title.grid(row=row_index, column=0, padx=18, pady=(8, 0), sticky="ew")
+            title.grid(row=row_index, column=0, columnspan=2, padx=18, pady=(8, 0), sticky="ew")
             row_index += 1
             # prepare and break very long words so labels can wrap
             value = str(value or "")
@@ -687,7 +696,7 @@ class CiscoAdvisoryApp(ctk.CTk):
                     justify="left",
                     wraplength=wrap_body,
                 )
-                body.grid(row=row_index, column=0, padx=18, pady=(2, 4), sticky="ew")
+                body.grid(row=row_index, column=0, columnspan=2, padx=18, pady=(2, 4), sticky="ew")
                 row_index += 1
 
         matched_text = "Matched: " + ", ".join(match.matched_products)
@@ -701,7 +710,7 @@ class CiscoAdvisoryApp(ctk.CTk):
             justify="left",
             wraplength=max(280, avail - 80),
         )
-        matched.grid(row=row_index, column=0, padx=18, pady=(8, 16), sticky="ew")
+        matched.grid(row=row_index, column=0, columnspan=2, padx=18, pady=(8, 16), sticky="ew")
         return card
 
     def _toggle_card(self, key: str) -> None:

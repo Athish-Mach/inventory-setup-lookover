@@ -96,6 +96,8 @@ def cleanup_old_files() -> None:
         
         # Clean up old log files
         for log_file in LOG_DIR.glob("*.log*"):
+            if log_file.resolve() == LOG_FILE.resolve():
+                continue
             try:
                 file_mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
                 if file_mtime < cutoff_time:

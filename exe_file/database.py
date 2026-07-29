@@ -95,3 +95,31 @@ class SupabaseDatabase:
             valid_rows.append(row)
 
         return valid_rows
+
+    def insert_advisory(self, advisory: dict[str, Any]) -> None:
+        if not self.advisory_tables:
+            raise RuntimeError("No advisory tables configured.")
+        target_table = self.advisory_tables[0]
+        self._client().table(target_table).insert(advisory).execute()
+
+    def next_advisory_id(self) -> int:
+        if not self.advisory_tables:
+            return 1
+        target_table = self.advisory_tables[0]
+        try:
+            response = (
+                self._client()
+                .table(target_table)
+                .select("id")
+                .order("id", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if response.data and len(response.data) > 0:
+                current_max = response.data[0].get("id")
+                if isinstance(current_max, int):
+                    return current_max + 1
+        except Exception as exc:
+            logger.warning("Could not fetch max advisory id: %s", exc)
+        return 1
+
