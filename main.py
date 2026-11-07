@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from playwright.async_api import BrowserContext, Error as PlaywrightError
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
+from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
 LISTING_URL = (
@@ -34,6 +35,10 @@ VERSION_PATTERN = re.compile(
     r"(?<![\w.-])\d+(?:\.\d+){1,4}(?:[A-Za-z]+)?"
     r"(?:[-._][A-Za-z0-9][A-Za-z0-9._-]*)?(?![\w.-])"
 )
+
+
+class SupabaseSetupError(RuntimeError):
+    """A persistent Supabase configuration problem that needs user action."""
 
 
 @dataclass(frozen=True)
@@ -81,10 +86,21 @@ class SupabaseAdvisoryStore:
 
     def replace_all(self, advisories: list[Advisory]) -> None:
         """Delete stale rows and insert only the newly scraped advisory data."""
+        if not advisories:
+            raise ValueError("Refusing to replace the advisory snapshot with no rows")
         table = self.client.table(self.table_name)
-        table.delete().gte("id", 0).execute()
-        if advisories:
+        try:
+            table.delete().gte("id", 0).execute()
             table.insert([advisory.as_json() for advisory in advisories]).execute()
+        except APIError as error:
+            if error.code == "PGRST205":
+                raise SupabaseSetupError(
+                    f"Supabase table public.{self.table_name} was not found. "
+                    "Run the SQL in supabase_schema.sql in the Supabase SQL "
+                    "Editor, then confirm SUPABASE_URL points to that project "
+                    "and SUPABASE_TABLE matches the table name."
+                ) from error
+            raise
 
 
 def clean_text(value: str) -> str:
@@ -236,8 +252,10 @@ class CiscoAdvisoryScraper:
     @staticmethod
     def _is_advisory_url(url: str) -> bool:
         parsed = urlparse(url)
+        hostname = (parsed.hostname or "").casefold()
         return (
-            parsed.netloc.endswith("cisco.com")
+            parsed.scheme == "https"
+            and (hostname == "cisco.com" or hostname.endswith(".cisco.com"))
             and "/security/center/" in parsed.path
             and "publicationListing" not in parsed.path
             and ("content/" in parsed.path or "advisory" in parsed.path.casefold())
@@ -289,7 +307,7 @@ class CiscoAdvisoryScraper:
             await page.close()
 
 
-async def launch_browser(playwright: object):
+async def launch_browser(playwright: Any):
     """Launch Chromium, downloading it once when Playwright has none locally."""
     try:
         return await playwright.chromium.launch(  # type: ignore[attr-defined]
@@ -331,6 +349,9 @@ async def run() -> None:
                     advisories = await scrape_once(scraper)
                     store.replace_all(advisories)
                     logging.info("Stored %s advisories in Supabase", len(advisories))
+                except SupabaseSetupError:
+                    logging.exception("Supabase setup must be corrected before scraping can continue")
+                    raise
                 except Exception:
                     logging.exception("Snapshot failed; the next cycle will retry")
                 logging.info(
