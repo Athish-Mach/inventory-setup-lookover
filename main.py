@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse
 
@@ -18,7 +19,8 @@ from playwright.async_api import BrowserContext, Error as PlaywrightError
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from postgrest.exceptions import APIError
-from supabase import Client, create_client
+from supabase import Client
+from supabase_client import create_resilient_client
 
 LISTING_URL = (
     "https://sec.cloudapps.cisco.com/security/center/publicationListing.x"
@@ -82,7 +84,7 @@ class SupabaseAdvisoryStore:
             raise RuntimeError(
                 "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env"
             )
-        return cls(create_client(url, key), table_name)
+        return cls(create_resilient_client(url, key), table_name)
 
     def replace_all(self, advisories: list[Advisory]) -> None:
         """Delete stale rows and insert only the newly scraped advisory data."""
@@ -307,8 +309,16 @@ class CiscoAdvisoryScraper:
             await page.close()
 
 
+def prepare_playwright_environment() -> None:
+    """Avoid Cursor sandbox browser paths that leave Chromium incomplete."""
+    sandbox_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if "cursor-sandbox-cache" in sandbox_path:
+        os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+
+
 async def launch_browser(playwright: Any):
     """Launch Chromium, downloading it once when Playwright has none locally."""
+    prepare_playwright_environment()
     try:
         return await playwright.chromium.launch(  # type: ignore[attr-defined]
             headless=True
@@ -320,6 +330,12 @@ async def launch_browser(playwright: Any):
         subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
             check=True,
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if key != "PLAYWRIGHT_BROWSERS_PATH"
+                or "cursor-sandbox-cache" not in value
+            },
         )
         return await playwright.chromium.launch(  # type: ignore[attr-defined]
             headless=True
@@ -333,6 +349,144 @@ async def scrape_once(scraper: CiscoAdvisoryScraper) -> list[Advisory]:
         advisory = await scraper.scrape_advisory(url)
         advisories.append(advisory)
     return advisories
+
+
+def scheduled_run_is_due(store: SupabaseAdvisoryStore) -> bool:
+    """Check the dashboard's enabled cadence against the last worker start."""
+    active_result = (
+        store.client.table("scraper_runs")
+        .select("id,status,created_at")
+        .in_("status", ["queued", "running"])
+        .limit(20)
+        .execute()
+    )
+    now = datetime.now(timezone.utc)
+    active_rows = getattr(active_result, "data", None) or []
+    for run in active_rows:
+        created_at = run.get("created_at")
+        if not created_at:
+            logging.info("An existing scraper run is active; skipping this check")
+            return False
+        started = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if now - started > timedelta(minutes=45):
+            store.client.table("scraper_runs").update(
+                {
+                    "status": "failed",
+                    "finished_at": now.isoformat(),
+                    "message": "The worker did not finish within the expected time.",
+                }
+            ).eq("id", run["id"]).in_("status", ["queued", "running"]).execute()
+        else:
+            logging.info("An existing scraper run is active; skipping this check")
+            return False
+
+    result = (
+        store.client.table("scraper_settings")
+        .select("enabled,interval_minutes,last_run_at")
+        .eq("id", 1)
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(result, "data", None) or []
+    if not rows:
+        raise RuntimeError("Missing scraper_settings row; run supabase_schema.sql")
+    settings = rows[0]
+    if not settings["enabled"]:
+        logging.info("Scheduled scraping is disabled in the dashboard")
+        return False
+    last_run_at = settings.get("last_run_at")
+    if not last_run_at:
+        return True
+    last_run = datetime.fromisoformat(last_run_at.replace("Z", "+00:00"))
+    interval_seconds = int(settings["interval_minutes"]) * 60
+    due = (now - last_run).total_seconds() >= interval_seconds
+    if not due:
+        logging.info("Scraper cadence has not elapsed; skipping this hourly check")
+    return due
+
+
+async def run_scrape_job(
+    source: str,
+    store: SupabaseAdvisoryStore | None = None,
+    run_id: int | None = None,
+) -> int:
+    """Run one scrape, replacing the snapshot and writing an operations record."""
+    if source not in {"manual", "scheduled"}:
+        raise ValueError("Unsupported scraper run source")
+    store = store or SupabaseAdvisoryStore.from_environment()
+    started_at = datetime.now(timezone.utc)
+    if run_id is None:
+        start_result = (
+            store.client.table("scraper_runs")
+            .insert(
+                {
+                    "run_source": source,
+                    "status": "running",
+                    "started_at": started_at.isoformat(),
+                    "message": "Scrape is in progress.",
+                }
+            )
+            .select("id")
+            .execute()
+        )
+        start_rows = getattr(start_result, "data", None) or []
+        if not start_rows:
+            raise RuntimeError("Could not create a scraper run record")
+        run_id = start_rows[0]["id"]
+    else:
+        queued_update = (
+            store.client.table("scraper_runs")
+            .update(
+                {
+                    "status": "running",
+                    "started_at": started_at.isoformat(),
+                    "message": "Scrape is in progress.",
+                }
+            )
+            .eq("id", run_id)
+            .eq("status", "queued")
+            .select("id")
+            .execute()
+        )
+        if not (getattr(queued_update, "data", None) or []):
+            raise RuntimeError("Could not find the queued dashboard run record")
+    store.client.table("scraper_settings").update(
+        {"last_run_at": started_at.isoformat()}
+    ).eq("id", 1).execute()
+
+    try:
+        async with async_playwright() as playwright:
+            browser = await launch_browser(playwright)
+            context = None
+            try:
+                context = await browser.new_context(user_agent=USER_AGENT)
+                scraper = CiscoAdvisoryScraper(context)
+                advisories = await scrape_once(scraper)
+                store.replace_all(advisories)
+            finally:
+                if context is not None:
+                    await context.close()
+                await browser.close()
+        finished_at = datetime.now(timezone.utc)
+        store.client.table("scraper_runs").update(
+            {
+                "status": "succeeded",
+                "finished_at": finished_at.isoformat(),
+                "advisory_count": len(advisories),
+                "message": "Scrape completed successfully.",
+            }
+        ).eq("id", run_id).execute()
+        logging.info("Stored %s advisories in Supabase", len(advisories))
+        return len(advisories)
+    except Exception:
+        store.client.table("scraper_runs").update(
+            {
+                "status": "failed",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "message": "Scrape failed. Review the worker log for details.",
+            }
+        ).eq("id", run_id).execute()
+        raise
 
 
 async def run() -> None:
@@ -365,4 +519,23 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Scrape Cisco security advisories")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true", help="Run one manual scrape")
+    parser.add_argument("--run-id", type=int, help="Existing queued manual run record")
+    mode.add_argument(
+        "--if-due",
+        action="store_true",
+        help="Run one scheduled scrape only when dashboard settings are due",
+    )
+    args = parser.parse_args()
+    if args.once:
+        asyncio.run(run_scrape_job("manual", run_id=args.run_id))
+    elif args.if_due:
+        store = SupabaseAdvisoryStore.from_environment()
+        if scheduled_run_is_due(store):
+            asyncio.run(run_scrape_job("scheduled", store))
+    else:
+        asyncio.run(run())

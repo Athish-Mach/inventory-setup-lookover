@@ -1,0 +1,65 @@
+name: Cisco advisory scraper
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      run_source:
+        description: Who requested this scrape
+        required: true
+        default: manual
+        type: choice
+        options:
+          - manual
+      run_id:
+        description: Dashboard run record to update
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cisco-advisory-scraper
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Install Chromium for Playwright
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run manual scrape
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ -n "$SCRAPER_RUN_ID" ]; then
+            python main.py --once --run-id "$SCRAPER_RUN_ID"
+          else
+            python main.py --once
+          fi
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SCRAPER_RUN_ID: ${{ inputs.run_id }}
+
+      - name: Check schedule and scrape if due
+        if: github.event_name == 'schedule'
+        run: python main.py --if-due
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f5f6f3" />
+    <meta name="description" content="A clear, focused workspace for Cisco security advisories." />
+    <title>Inventory Setup · Security intelligence</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <div id="login-view" class="login-shell" hidden>
+      <div class="login-aside">
+        <a class="brand brand-light" href="/" aria-label="Inventory Setup home">
+          <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.7 20 6v5.5c0 5.1-3.4 8.5-8 9.8-4.6-1.3-8-4.7-8-9.8V6l8-3.3Z"/><path d="m8.5 12 2.2 2.2 4.9-5"/></svg></span>
+          <span>inventory<span class="brand-light-word">setup</span></span>
+        </a>
+        <div class="login-aside-copy">
+          <div class="eyebrow eyebrow-light"><span class="pulse-dot"></span> SECURITY OPERATIONS</div>
+          <h1>Clarity for<br />what comes next.</h1>
+          <p>One calm, considered workspace for the Cisco advisories your team needs to act on.</p>
+        </div>
+        <div class="aside-foot"><span class="mini-shield">✓</span> Private workspace · Protected access</div>
+      </div>
+      <main class="login-main">
+        <div class="login-topline"><span>TEAM ACCESS</span><span class="status-label"><i></i> SYSTEM OPERATIONAL</span></div>
+        <form id="login-form" class="login-card" autocomplete="on">
+          <div class="login-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg></div>
+          <p class="eyebrow">WELCOME BACK</p>
+          <h2>Sign in to your workspace</h2>
+          <p class="muted login-subtitle">Use your team credentials to continue.</p>
+          <label for="username">Username</label>
+          <div class="field-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.6-3.4 3-5.2 7-5.2s6.4 1.8 7 5.2"/></svg><input id="username" name="username" autocomplete="username" required minlength="3" maxlength="64" placeholder="Your username" /></div>
+          <label for="password">Password</label>
+          <div class="field-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="Enter your password" /><button class="password-toggle" type="button" aria-label="Show password">Show</button></div>
+          <p id="login-error" class="form-error" role="alert" hidden></p>
+          <button class="button button-primary login-button" type="submit"><span>Sign in securely</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
+          <div class="secure-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.7 20 6v5.5c0 5.1-3.4 8.5-8 9.8-4.6-1.3-8-4.7-8-9.8V6l8-3.3Z"/><path d="m8.5 12 2.2 2.2 4.9-5"/></svg> Your session is encrypted and securely managed.</div>
+        </form>
+        <div class="login-footer"><span>© 2026 Inventory Setup</span><span>BUILT FOR A SAFER NETWORK</span></div>
+      </main>
+    </div>
+
+    <div id="app-view" class="app-shell" hidden>
+      <aside class="sidebar" id="sidebar">
+        <a class="brand brand-dark" href="#overview" aria-label="Inventory Setup overview">
+          <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.7 20 6v5.5c0 5.1-3.4 8.5-8 9.8-4.6-1.3-8-4.7-8-9.8V6l8-3.3Z"/><path d="m8.5 12 2.2 2.2 4.9-5"/></svg></span><span>inventory<span class="brand-word">setup</span></span>
+        </a>
+        <div class="workspace-switch"><span class="workspace-avatar">N</span><span class="workspace-copy"><strong>Machtude LLC</strong><small>Security workspace</small></span><svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg></div>
+        <p class="nav-label">WORKSPACE</p>
+        <nav class="main-nav" aria-label="Main navigation">
+          <button class="nav-item active" data-view="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="10" width="8" height="11" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/></svg>Overview</button>
+          <button class="nav-item" data-view="advisories"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 22 20H2L12 3Z"/><path d="M12 9v5m0 3h.01"/></svg>Advisories<span class="nav-count" id="nav-count">—</span></button>
+          <button class="nav-item" data-view="products"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01m4-10h6m-6 10h6"/></svg>Products</button>
+          <button class="nav-item admin-nav" data-view="operations"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1a1.7 1.7 0 1 1-2.4 2.4l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a1.7 1.7 0 1 1-3.4 0v-.2a1.7 1.7 0 0 0-2.9-1.2l-.1.1a1.7 1.7 0 1 1-2.4-2.4l.1-.1a1.7 1.7 0 0 0-1.2-2.9H4a1.7 1.7 0 1 1 0-3.4h.2a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a1.7 1.7 0 1 1 2.4-2.4l.1.1a1.7 1.7 0 0 0 2.9-1.2V2a1.7 1.7 0 1 1 3.4 0v.2a1.7 1.7 0 0 0 2.9 1.2l.1-.1a1.7 1.7 0 1 1 2.4 2.4l-.1.1a1.7 1.7 0 0 0 1.2 2.9h.2a1.7 1.7 0 1 1 0 3.4h-.2a1.7 1.7 0 0 0-1.2 2.9Z"/></svg>Operations</button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="sidebar-help"><span class="help-icon">?</span><div><strong>Need a hand?</strong><small>Visit the help center</small></div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg></div>
+          <div class="profile-row"><span class="profile-avatar" id="profile-avatar">A</span><span class="profile-copy"><strong id="profile-name">Administrator</strong><small>Workspace admin</small></span><button id="sign-out" class="icon-button sign-out" aria-label="Sign out" title="Sign out"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5m5 5H3m9-9h7a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-7"/></svg></button></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar"><button class="icon-button mobile-menu" id="mobile-menu" aria-label="Open navigation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><div class="breadcrumbs"><span>Workspace</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg><strong id="breadcrumb-current">Overview</strong></div><div class="topbar-right"><span class="sync-indicator"><i></i> Live data</span><span class="top-divider"></span><button class="top-user"><span class="top-user-avatar">S</span><span>Security team</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg></button></div></header>
+
+        <section class="page-wrap" id="overview-view">
+          <div class="welcome-row"><div><div class="eyebrow date-eyebrow"><span class="pulse-dot"></span> SECURITY INTELLIGENCE <span class="eyebrow-sep">/</span> <span id="today-date">TODAY</span></div><h1>Good morning, <span id="welcome-name">Admin</span><span class="wave">✳</span></h1><p class="page-subtitle">Here’s the latest from your Cisco advisory feed.</p></div><button class="button button-secondary refresh-button" id="refresh-button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 12-2L20 12M4 12l2.4 5a7 7 0 0 0 12-2"/></svg><span>Refresh data</span></button></div>
+
+          <div class="summary-grid">
+            <article class="metric-card"><div class="metric-top"><span class="metric-icon metric-icon-ink"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 22 20H2L12 3Z"/><path d="M12 9v5m0 3h.01"/></svg></span><span class="metric-kicker">CURRENT FEED</span><button class="metric-menu" aria-label="Advisory information">···</button></div><div class="metric-value" id="metric-advisories">—</div><div class="metric-caption">advisories in your feed</div><div class="metric-foot"><span class="metric-foot-icon neutral"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg></span><span>Updated with the latest scrape</span></div></article>
+            <article class="metric-card"><div class="metric-top"><span class="metric-icon metric-icon-green"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01m4-10h6m-6 10h6"/></svg></span><span class="metric-kicker">PRODUCT EXPOSURE</span><button class="metric-menu" aria-label="Product information">···</button></div><div class="metric-value" id="metric-products">—</div><div class="metric-caption">unique products referenced</div><div class="metric-foot"><span class="metric-foot-icon green"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V8m6 10V5m6 13v-7m5 7H2"/></svg></span><span>Across the current feed</span></div></article>
+            <article class="metric-card"><div class="metric-top"><span class="metric-icon metric-icon-blue"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h10l4 4v14H5z"/><path d="M14 3v5h5M8 13h8m-8 4h8"/></svg></span><span class="metric-kicker">FIXED RELEASES</span><button class="metric-menu" aria-label="Release information">···</button></div><div class="metric-value" id="metric-releases">—</div><div class="metric-caption">release versions identified</div><div class="metric-foot"><span class="metric-foot-icon blue"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></span><span>Listed in fixed software notes</span></div></article>
+            <article class="metric-card metric-card-status"><div class="metric-top"><span class="metric-icon metric-icon-sand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 22 20H2L12 3Z"/><path d="M12 9v5m0 3h.01"/></svg></span><span class="metric-kicker">FEED STATUS</span><span class="live-badge"><i></i> HEALTHY</span></div><div class="metric-status-main">All systems<br /><strong>in sync</strong></div><div class="metric-foot"><span class="metric-foot-icon green"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></span><span id="last-sync">Connected to your data source</span></div></article>
+          </div>
+
+          <section class="content-card advisory-card" id="advisory-section">
+            <div class="section-head"><div><div class="section-title-line"><h2 id="list-title">Latest advisories</h2><span class="count-pill" id="list-count">0</span></div><p class="section-description">Stay informed on the latest Cisco security updates.</p></div><div class="list-actions"><label class="search-box" for="advisory-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.5 4.5"/></svg><input id="advisory-search" type="search" placeholder="Search advisories" autocomplete="off" /></label><button class="filter-button" id="filter-button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M7 12h10m-7 5h4"/></svg><span>Filter</span></button></div></div>
+            <div class="table-wrap"><table><thead><tr><th>ADVISORY</th><th>AFFECTED PRODUCTS</th><th>FIXED RELEASES</th><th>LAST UPDATED</th><th></th></tr></thead><tbody id="advisory-rows"><tr><td colspan="5" class="loading-cell"><span class="spinner"></span> Loading advisory feed…</td></tr></tbody></table></div>
+            <div class="table-footer"><span id="table-summary">Loading records</span><button class="text-button" id="view-all">View all advisories <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button></div>
+          </section>
+
+          <footer class="app-footer"><span><span class="footer-mark">●</span> INVENTORY SETUP <span class="footer-dot">·</span> SECURITY INTELLIGENCE</span><span>Data is sourced from Cisco public security advisories.</span></footer>
+        </section>
+
+        <section class="page-wrap operations-wrap" id="operations-view" hidden>
+          <div class="welcome-row operations-heading"><div><div class="eyebrow date-eyebrow"><span class="pulse-dot"></span> WORKSPACE CONTROLS</div><h1>Operations</h1><p class="page-subtitle">Manage product watchlists and how advisory data gets refreshed.</p></div><button class="button button-secondary" id="operations-refresh"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 12-2L20 12M4 12l2.4 5a7 7 0 0 0 12-2"/></svg>Refresh status</button></div>
+          <div class="operations-grid">
+            <section class="content-card ops-card scraper-card">
+              <div class="ops-card-head"><div class="ops-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3 2"/></svg></div><div><h2>Scraper schedule</h2><p>Choose how often the worker checks Cisco’s advisory feed.</p></div><span class="schedule-pill" id="schedule-state">Loading</span></div>
+              <form id="schedule-form" class="schedule-form">
+                <label class="toggle-row" for="schedule-enabled"><span><strong>Automatic refresh</strong><small>Scheduled checks can be paused at any time.</small></span><input type="checkbox" id="schedule-enabled" /><span class="toggle-ui" aria-hidden="true"></span></label>
+                <label class="field-label" for="schedule-interval">Refresh cadence</label>
+                <select id="schedule-interval"><option value="60">Hourly</option><option value="360">Every 6 hours</option><option value="1440">Daily</option></select>
+                <p class="field-hint">The worker checks hourly. A selected cadence is the minimum time between scheduled scrapes, so a run may start shortly after it becomes due.</p>
+                <div class="schedule-actions"><button class="button button-primary" type="submit" id="save-schedule">Save schedule</button><button class="button button-secondary run-now-button" id="run-scraper" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 9 6-9 6V6Z"/></svg>Run scraper now</button></div>
+                <p id="schedule-feedback" class="ops-feedback" role="status" hidden></p>
+              </form>
+              <div class="worker-note"><span class="worker-note-icon">i</span><span id="worker-note-text">Checking how scraper runs are launched…</span></div>
+            </section>
+            <section class="content-card ops-card runs-card">
+              <div class="runs-card-head"><div><h2>Recent scraper activity</h2><p>Manual and scheduled runs from the worker.</p></div><span class="activity-live"><i></i> ACTIVITY</span></div>
+              <div id="scraper-runs" class="runs-list"><div class="ops-loading"><span class="spinner"></span> Loading activity…</div></div>
+            </section>
+          </div>
+          <section class="content-card products-admin-card">
+            <div class="section-head product-admin-head"><div><div class="section-title-line"><h2>Tracked products</h2><span class="count-pill" id="tracked-product-count">0</span></div><p class="section-description">Keep a team watchlist of products that matter to your environment.</p></div><span class="watchlist-tag"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16"/><circle cx="8" cy="5" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="10" cy="19" r="1.5"/></svg> TEAM WATCHLIST</span></div>
+            <form id="product-form" class="product-form"><div class="product-form-field"><label class="field-label" for="product-name">Product name</label><input id="product-name" name="name" maxlength="160" placeholder="e.g. Cisco Secure Firewall" required /></div><div class="product-form-field product-notes-field"><label class="field-label" for="product-notes">Notes <span>(optional)</span></label><input id="product-notes" name="notes" maxlength="500" placeholder="Add a team note or environment context" /></div><button class="button button-primary add-product-button" type="submit"><span>＋</span> Add product</button></form>
+            <p id="product-feedback" class="ops-feedback product-feedback" role="status" hidden></p>
+            <div class="table-wrap"><table class="products-table"><thead><tr><th>PRODUCT</th><th>TEAM NOTES</th><th>STATUS</th><th>ADDED</th><th></th></tr></thead><tbody id="tracked-products"><tr><td colspan="5" class="loading-cell"><span class="spinner"></span> Loading products…</td></tr></tbody></table></div>
+          </section>
+          <footer class="app-footer"><span><span class="footer-mark">●</span> INVENTORY SETUP <span class="footer-dot">·</span> OPERATIONS</span><span>Cadence is checked hourly in UTC by the GitHub Actions worker.</span></footer>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="detail-dialog" id="detail-dialog"><form method="dialog"><button class="dialog-close" aria-label="Close details">×</button></form><div id="detail-content"></div></dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>
