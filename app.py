@@ -11,6 +11,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -24,7 +25,7 @@ from jwt import InvalidTokenError
 from pydantic import BaseModel, Field, field_validator
 from pwdlib import PasswordHash
 from postgrest.exceptions import APIError
-from supabase import Client
+from supabase import Client, SupabaseException
 
 from supabase_client import create_resilient_client
 
@@ -41,6 +42,7 @@ USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
 password_hasher = PasswordHash.recommended()
 _dummy_hash = password_hasher.hash(secrets.token_urlsafe(24))
 _supabase: Client | None = None
+_supabase_lock = Lock()
 
 app = FastAPI(
     title="Cisco Security Intelligence API",
@@ -97,16 +99,23 @@ class ScraperSettingsUpdate(BaseModel):
 def database() -> Client:
     """Return the server-only Supabase client or report missing configuration."""
     global _supabase
-    if _supabase is None:
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        if not url or not key:
-            raise HTTPException(
-                status_code=503,
-                detail="Server database configuration is incomplete.",
-            )
-        _supabase = create_resilient_client(url, key)
-    return _supabase
+    with _supabase_lock:
+        if _supabase is None:
+            url = os.getenv("SUPABASE_URL")
+            key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+            if not url or not key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Server database configuration is incomplete.",
+                )
+            try:
+                _supabase = create_resilient_client(url, key)
+            except (SupabaseException, httpx.InvalidURL) as error:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Server database configuration is invalid.",
+                ) from error
+        return _supabase
 
 
 def github_scraper_config() -> tuple[str, str, str, str] | None:
@@ -141,7 +150,8 @@ def scraper_runner() -> Literal["github", "local", "unconfigured"]:
     return "unconfigured"
 
 
-def mark_scraper_run_failed(run_id: int, message: str) -> None:
+def mark_scraper_run_failed(run_id: int, message: str, *, queued_only: bool = False) -> None:
+    statuses = ["queued"] if queued_only else ["queued", "running"]
     try:
         database().table("scraper_runs").update(
             {
@@ -149,8 +159,8 @@ def mark_scraper_run_failed(run_id: int, message: str) -> None:
                 "finished_at": datetime.now(timezone.utc).isoformat(),
                 "message": message,
             }
-        ).eq("id", run_id).in_("status", ["queued", "running"]).execute()
-    except APIError:
+        ).eq("id", run_id).in_("status", statuses).execute()
+    except (APIError, httpx.HTTPError):
         logging.exception("Could not mark scraper run %s as failed", run_id)
 
 
@@ -210,11 +220,7 @@ def jwt_secret() -> str:
 
 
 def client_address(request: Request) -> str:
-    """Use Vercel's forwarded client address, falling back to ASGI's peer."""
-    forwarded = request.headers.get("x-forwarded-for", "")
-    address = forwarded.split(",", 1)[0].strip()
-    if address and len(address) <= 64:
-        return address
+    """Use the ASGI server's client address and its trusted proxy configuration."""
     return request.client.host if request.client else "unknown"
 
 
@@ -224,7 +230,7 @@ def rate_key(username: str, address: str) -> str:
 
 def consume_login_attempt(client: Client, username: str, address: str) -> bool:
     allowed = True
-    for key in {rate_key(username, address), rate_key(username, "account") }:
+    for key in {rate_key(username, address), rate_key(username, "account")}:
         result = client.rpc(
             "consume_login_attempt",
             {"p_key_hash": key, "p_window_seconds": 900, "p_max_attempts": 8},
@@ -347,8 +353,27 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def read_advisory_feed(limit: int) -> dict[str, Any]:
+    feed = database().rpc(
+        "read_advisory_feed", {"p_limit": min(max(limit, 1), 500)}
+    ).execute().data
+    if not isinstance(feed, dict):
+        raise HTTPException(status_code=503, detail="Advisory feed configuration is incomplete.")
+    return feed
+
+
+@app.get("/api/ready")
+def readiness() -> JSONResponse:
+    try:
+        jwt_secret()
+        read_advisory_feed(1)
+    except (HTTPException, APIError, httpx.HTTPError):
+        return JSONResponse({"status": "unavailable"}, status_code=503)
+    return JSONResponse({"status": "ready"})
+
+
 @app.post("/api/auth/login")
-async def login(body: LoginBody, request: Request, response: Response) -> dict[str, Any]:
+def login(body: LoginBody, request: Request, response: Response) -> dict[str, Any]:
     secret = jwt_secret()
     client = database()
     try:
@@ -420,7 +445,7 @@ async def login(body: LoginBody, request: Request, response: Response) -> dict[s
 
 
 @app.post("/api/auth/logout")
-async def logout(
+def logout(
     request: Request,
     response: Response,
     user: dict[str, str] = Depends(current_user),
@@ -442,31 +467,23 @@ async def session(user: dict[str, str] = Depends(current_user)) -> dict[str, Any
 
 
 @app.get("/api/advisories")
-async def advisories(
+def advisories(
     limit: int = 100,
     user: dict[str, str] = Depends(current_user),
 ) -> dict[str, Any]:
     del user
-    client = database()
-    limit = min(max(limit, 1), 500)
     try:
-        result = (
-            client.table("cisco_security_advisories")
-            .select("id,name,summary,workarounds,affected_products,fixed_software,fixed_releases,created_at", count="exact")
-            .order("id", desc=True)
-            .limit(limit)
-            .execute()
-        )
+        feed = read_advisory_feed(limit)
     except APIError as error:
-        if error.code == "PGRST205":
+        if error.code in {"PGRST202", "PGRST205"}:
             raise HTTPException(
                 status_code=503,
-                detail="The advisory table is missing. Run supabase_schema.sql in the Supabase SQL Editor.",
+                detail="The advisory schema is missing or outdated. Apply supabase_schema.sql.",
             ) from error
         logging.error("Advisory query failed (Supabase code %s)", error.code)
         raise HTTPException(status_code=503, detail="Advisory data is temporarily unavailable") from error
 
-    data = result.data or []
+    data = feed["items"]
     products = {
         product
         for advisory in data
@@ -478,8 +495,7 @@ async def advisories(
         for release in (advisory.get("fixed_releases") or [])
     }
     return {
-        "items": data,
-        "total": result.count if result.count is not None else len(data),
+        **feed,
         "products": len(products),
         "fixed_releases": len(releases),
     }
@@ -497,39 +513,8 @@ def require_admin(user: dict[str, str]) -> None:
         raise HTTPException(status_code=403, detail="Administrator access required")
 
 
-def has_active_scraper_run(client: Client) -> bool:
-    """Ignore abandoned run records but prevent real overlapping launches."""
-    result = (
-        client.table("scraper_runs")
-        .select("id,status,created_at")
-        .in_("status", ["queued", "running"])
-        .limit(20)
-        .execute()
-    )
-    rows = getattr(result, "data", None) or []
-    now = datetime.now(timezone.utc)
-    active = False
-    for run in rows:
-        created_at = run.get("created_at")
-        if not created_at:
-            active = True
-            continue
-        started = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        if now - started > timedelta(minutes=45):
-            client.table("scraper_runs").update(
-                {
-                    "status": "failed",
-                    "finished_at": now.isoformat(),
-                    "message": "The worker did not finish within the expected time.",
-                }
-            ).eq("id", run["id"]).in_("status", ["queued", "running"]).execute()
-        else:
-            active = True
-    return active
-
-
 @app.get("/api/admin/products")
-async def list_tracked_products(
+def list_tracked_products(
     user: dict[str, str] = Depends(current_user),
 ) -> dict[str, Any]:
     require_admin(user)
@@ -549,7 +534,7 @@ async def list_tracked_products(
 
 
 @app.post("/api/admin/products", status_code=201)
-async def add_tracked_product(
+def add_tracked_product(
     body: ProductCreate,
     user: dict[str, str] = Depends(current_user),
 ) -> dict[str, Any]:
@@ -580,7 +565,7 @@ async def add_tracked_product(
 
 
 @app.patch("/api/admin/products/{product_id}")
-async def set_tracked_product_state(
+def set_tracked_product_state(
     product_id: int,
     body: ProductState,
     user: dict[str, str] = Depends(current_user),
@@ -604,7 +589,7 @@ async def set_tracked_product_state(
 
 
 @app.delete("/api/admin/products/{product_id}", status_code=204)
-async def delete_tracked_product(
+def delete_tracked_product(
     product_id: int,
     user: dict[str, str] = Depends(current_user),
 ) -> Response:
@@ -620,7 +605,7 @@ async def delete_tracked_product(
 
 
 @app.get("/api/admin/scraper/settings")
-async def get_scraper_settings(
+def get_scraper_settings(
     user: dict[str, str] = Depends(current_user),
 ) -> dict[str, Any]:
     require_admin(user)
@@ -657,7 +642,7 @@ async def get_scraper_settings(
 
 
 @app.put("/api/admin/scraper/settings")
-async def update_scraper_settings(
+def update_scraper_settings(
     body: ScraperSettingsUpdate,
     user: dict[str, str] = Depends(current_user),
 ) -> dict[str, str]:
@@ -678,7 +663,7 @@ async def update_scraper_settings(
 
 
 @app.post("/api/admin/scraper/run", status_code=202)
-async def trigger_scraper(
+def trigger_scraper(
     background_tasks: BackgroundTasks,
     user: dict[str, str] = Depends(current_user),
 ) -> dict[str, Any]:
@@ -695,42 +680,27 @@ async def trigger_scraper(
             ),
         )
 
-    run_id: int | None = None
     try:
-        if has_active_scraper_run(database()):
-            raise HTTPException(status_code=409, detail="A scraper run is already queued or running")
-        queued = (
-            database()
-            .table("scraper_runs")
-            .insert(
-                {
-                    "run_source": "manual",
-                    "status": "queued",
-                    "requested_by": user["username"],
-                    "message": (
-                        "Queued for the local scraper."
-                        if runner == "local"
-                        else "Queued from the dashboard."
-                    ),
-                }
-            )
-            .select("id")
-            .execute()
-        )
-        queued_rows = getattr(queued, "data", None) or []
-        run_id = int(queued_rows[0]["id"]) if queued_rows else None
-        if run_id is None:
-            raise HTTPException(status_code=503, detail="Could not create the scraper run record")
+        run_id = database().rpc(
+            "claim_scraper_run",
+            {"p_source": "manual", "p_requested_by": user["username"]},
+        ).execute().data
+    except (APIError, httpx.HTTPError) as error:
+        logging.error("Scraper queue request failed (%s)", type(error).__name__)
+        raise HTTPException(status_code=503, detail="Could not confirm the scraper queue request") from error
+    if run_id is None:
+        raise HTTPException(status_code=409, detail="A scraper run is already queued or running")
 
-        if runner == "local":
-            background_tasks.add_task(run_local_scraper, run_id)
-            return {"status": "queued", "run_id": run_id, "runner": "local"}
+    if runner == "local":
+        background_tasks.add_task(run_local_scraper, run_id)
+        return {"status": "queued", "run_id": run_id, "runner": "local"}
 
-        assert github is not None
-        token, repository, branch, workflow = github
-        url = f"https://api.github.com/repos/{repository}/actions/workflows/{workflow}/dispatches"
-        async with httpx.AsyncClient(timeout=8) as client:
-            response = await client.post(
+    assert github is not None
+    token, repository, branch, workflow = github
+    url = f"https://api.github.com/repos/{repository}/actions/workflows/{workflow}/dispatches"
+    try:
+        with httpx.Client(timeout=8) as client:
+            response = client.post(
                 url,
                 headers={
                     "Accept": "application/vnd.github+json",
@@ -739,21 +709,29 @@ async def trigger_scraper(
                 },
                 json={"ref": branch, "inputs": {"run_source": "manual", "run_id": str(run_id)}},
             )
-        if response.status_code != 204:
-            mark_scraper_run_failed(run_id, "GitHub did not accept the run request.")
-            raise HTTPException(
-                status_code=502,
-                detail="GitHub could not queue the scraper. Check its repository, branch, workflow, and token permissions.",
-            )
-    except HTTPException:
-        raise
-    except (APIError, httpx.HTTPError) as error:
-        if run_id is not None:
-            mark_scraper_run_failed(run_id, "The run could not be queued.")
-        logging.error("Scraper dispatch failed (%s)", type(error).__name__)
-        raise HTTPException(status_code=502, detail="Could not queue the scraper run") from error
+    except httpx.HTTPError as error:
+        logging.warning("GitHub dispatch could not be confirmed for run %s (%s)", run_id, type(error).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail=f"GitHub did not confirm run #{run_id}. Check Operations for its status.",
+        ) from error
+    if response.status_code != 204:
+        if 400 <= response.status_code < 500:
+            mark_scraper_run_failed(run_id, "GitHub rejected the run request.", queued_only=True)
+            detail = "GitHub rejected the scraper request. Check the repository, branch, workflow, and token permissions."
+        else:
+            detail = f"GitHub did not confirm run #{run_id}. Check Operations for its status."
+        raise HTTPException(status_code=502, detail=detail)
 
     return {"status": "queued", "run_id": run_id, "runner": "github"}
+
+
+@app.exception_handler(httpx.TransportError)
+async def upstream_unavailable(request: Request, error: httpx.TransportError) -> JSONResponse:
+    logging.warning("Upstream service unavailable for %s (%s)", request.url.path, type(error).__name__)
+    response = JSONResponse({"detail": "The data service is temporarily unavailable."}, status_code=503)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.exception_handler(Exception)

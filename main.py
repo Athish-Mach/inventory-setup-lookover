@@ -9,9 +9,9 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Iterable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urldefrag, urlparse
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 from dotenv import load_dotenv
@@ -31,11 +31,17 @@ USER_AGENT = (
 )
 MAX_RETRIES = 3
 NAVIGATION_TIMEOUT_MS = 45_000
+SCRAPE_TIMEOUT_SECONDS = 8 * 60
 SCRAPE_INTERVAL_SECONDS = 3600
 SECTION_HEADINGS = {"summary", "workarounds", "affected products", "fixed software"}
 VERSION_PATTERN = re.compile(
-    r"(?<![\w.-])\d+(?:\.\d+){1,4}(?:[A-Za-z]+)?"
+    r"(?<![\w.-])\d+(?:\.\d+){1,4}(?:\([\d.A-Za-z]+\))?"
+    r"(?:[A-Za-z][A-Za-z0-9]*)?"
     r"(?:[-._][A-Za-z0-9][A-Za-z0-9._-]*)?(?![\w.-])"
+)
+FIXED_COLUMN_PATTERN = re.compile(
+    r"(?:first )?fixed (?:(?:software|firmware) )?(?:release|version)s?",
+    re.IGNORECASE,
 )
 
 
@@ -53,9 +59,10 @@ class Advisory:
     affected_products: list[str]
     fixed_software: str
     fixed_releases: list[str]
+    source_url: str | None = None
 
-    def as_json(self) -> dict[str, str | list[str]]:
-        """Return precisely the output contract expected by downstream users."""
+    def as_json(self) -> dict[str, str | list[str] | None]:
+        """Serialize the fields stored in the advisory snapshot."""
         return {
             "name": self.name,
             "summary": self.summary,
@@ -63,15 +70,15 @@ class Advisory:
             "affected_products": self.affected_products,
             "fixed_software": self.fixed_software,
             "fixed_releases": self.fixed_releases,
+            "source_url": self.source_url,
         }
 
 
 class SupabaseAdvisoryStore:
     """Replace the advisory table with the latest Cisco listing snapshot."""
 
-    def __init__(self, client: Client, table_name: str) -> None:
+    def __init__(self, client: Client) -> None:
         self.client = client
-        self.table_name = table_name
 
     @classmethod
     def from_environment(cls) -> "SupabaseAdvisoryStore":
@@ -79,30 +86,30 @@ class SupabaseAdvisoryStore:
         load_dotenv()
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
-        table_name = os.getenv("SUPABASE_TABLE", "cisco_security_advisories")
         if not url or not key:
             raise RuntimeError(
                 "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env"
             )
-        return cls(create_resilient_client(url, key), table_name)
+        if os.getenv("SUPABASE_TABLE", "cisco_security_advisories") != "cisco_security_advisories":
+            raise SupabaseSetupError("The dashboard requires the cisco_security_advisories table.")
+        return cls(create_resilient_client(url, key))
 
-    def replace_all(self, advisories: list[Advisory]) -> None:
-        """Delete stale rows and insert only the newly scraped advisory data."""
-        if not advisories:
-            raise ValueError("Refusing to replace the advisory snapshot with no rows")
-        table = self.client.table(self.table_name)
+    def rpc(self, name: str, params: dict[str, Any]) -> Any:
         try:
-            table.delete().gte("id", 0).execute()
-            table.insert([advisory.as_json() for advisory in advisories]).execute()
+            return self.client.rpc(name, params).execute().data
         except APIError as error:
-            if error.code == "PGRST205":
+            if error.code in {"PGRST202", "PGRST205"}:
                 raise SupabaseSetupError(
-                    f"Supabase table public.{self.table_name} was not found. "
-                    "Run the SQL in supabase_schema.sql in the Supabase SQL "
-                    "Editor, then confirm SUPABASE_URL points to that project "
-                    "and SUPABASE_TABLE matches the table name."
+                    "Apply supabase_schema.sql to the configured Supabase project."
                 ) from error
             raise
+
+    def publish(self, run_id: int, advisories: list[Advisory]) -> int:
+        """Commit the snapshot and the successful run status together."""
+        return self.rpc(
+            "publish_advisory_snapshot",
+            {"p_run_id": run_id, "p_items": [advisory.as_json() for advisory in advisories]},
+        )
 
 
 def clean_text(value: str) -> str:
@@ -212,12 +219,29 @@ def extract_products(soup: BeautifulSoup) -> list[str]:
     return list(dict.fromkeys(product for product in products if product))
 
 
-def extract_fixed_releases(fixed_software: str) -> list[str]:
-    """Extract distinct release/version strings in their published order."""
-    releases = (
-        match.rstrip(".,;:") for match in VERSION_PATTERN.findall(fixed_software)
-    )
-    return list(dict.fromkeys(release for release in releases if release))
+def extract_fixed_releases(fixed_nodes: Iterable[Tag]) -> list[str]:
+    """Read version identifiers only from columns explicitly labeled as fixes."""
+    releases: list[str] = []
+    for node in fixed_nodes:
+        tables = [node] if node.name == "table" else node.find_all("table")
+        for table in tables:
+            fixed_columns: list[int] = []
+            for row in table.find_all("tr"):
+                cells = [
+                    clean_text(cell.get_text(" ", strip=True))
+                    for cell in row.find_all(["th", "td"], recursive=False)
+                ]
+                labeled_columns = [
+                    index for index, cell in enumerate(cells)
+                    if FIXED_COLUMN_PATTERN.fullmatch(cell)
+                ]
+                if labeled_columns:
+                    fixed_columns = labeled_columns
+                    continue
+                for index in fixed_columns:
+                    if index < len(cells) and VERSION_PATTERN.match(cells[index]):
+                        releases.extend(VERSION_PATTERN.findall(cells[index]))
+    return list(dict.fromkeys(releases))
 
 
 class CiscoAdvisoryScraper:
@@ -236,7 +260,7 @@ class CiscoAdvisoryScraper:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 response = await page.goto(url, wait_until="domcontentloaded")
-                if response is not None and response.status >= 500:
+                if response is not None and response.status >= 400:
                     raise RuntimeError(f"Cisco returned HTTP {response.status}")
                 return
             except (PlaywrightTimeoutError, RuntimeError) as error:
@@ -269,18 +293,24 @@ class CiscoAdvisoryScraper:
         try:
             await self._goto_with_retries(page, LISTING_URL)
             await page.wait_for_function(
-                """() => [...document.querySelectorAll(
-                    '#advisory-tab a[href], a[href]')]
-                    .some(link => link.href.includes('/security/center/content/'))""",
+                """() => new Set([...document.querySelectorAll('a[href]')]
+                    .filter(link => link instanceof HTMLAnchorElement &&
+                        link.protocol === 'https:' &&
+                        (link.hostname === 'cisco.com' || link.hostname.endsWith('.cisco.com')) &&
+                        link.pathname.includes('/security/center/') &&
+                        !link.pathname.includes('publicationListing') &&
+                        (link.pathname.includes('content/') || /advisory/i.test(link.pathname)))
+                    .map(link => link.href.split('#')[0])).size >= 4""",
                 timeout=NAVIGATION_TIMEOUT_MS,
             )
-            hrefs = await page.locator("#advisory-tab a[href], a[href]").evaluate_all(
-                "links => links.map(link => link.href)"
+            hrefs = await page.locator("a[href]").evaluate_all(
+                """links => [
+                    ...links.filter(link => link.closest('#advisory-tab')),
+                    ...links,
+                ].filter(link => link instanceof HTMLAnchorElement).map(link => link.href)"""
             )
             unique = list(dict.fromkeys(
-                urljoin(LISTING_URL, href)
-                for href in hrefs
-                if self._is_advisory_url(href)
+                urldefrag(href).url for href in hrefs if self._is_advisory_url(href)
             ))
             if len(unique) < 4:
                 raise RuntimeError(f"Cisco displayed only {len(unique)} advisory links")
@@ -295,15 +325,23 @@ class CiscoAdvisoryScraper:
             await self._goto_with_retries(page, url)
             await page.wait_for_selector("h1", timeout=NAVIGATION_TIMEOUT_MS)
             soup = BeautifulSoup(await page.content(), "html.parser")
-            name_tag = soup.find("h1")
-            fixed_software = extract_section(soup, "Fixed Software")
+            name_tag = soup.select_one("h1.headline") or soup.find("h1")
+            name = clean_text(name_tag.get_text(" ", strip=True)) if name_tag else ""
+            summary = extract_section(soup, "Summary")
+            if (
+                not name or name.casefold() == "cisco security advisory"
+                or not summary or not self._is_advisory_url(page.url)
+            ):
+                raise RuntimeError(f"Cisco advisory was incomplete or redirected: {url}")
+            fixed_nodes = section_nodes(soup, "Fixed Software")
             return Advisory(
-                name=clean_text(name_tag.get_text(" ", strip=True)) if name_tag else "",
-                summary=extract_section(soup, "Summary"),
+                name=name,
+                summary=summary,
                 workarounds=extract_section(soup, "Workarounds"),
                 affected_products=extract_products(soup),
-                fixed_software=fixed_software,
-                fixed_releases=extract_fixed_releases(fixed_software),
+                fixed_software=text_from_nodes(fixed_nodes),
+                fixed_releases=extract_fixed_releases(fixed_nodes),
+                source_url=url,
             )
         finally:
             await page.close()
@@ -330,6 +368,7 @@ async def launch_browser(playwright: Any):
         subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
             check=True,
+            timeout=120,
             env={
                 key: value
                 for key, value in os.environ.items()
@@ -351,171 +390,64 @@ async def scrape_once(scraper: CiscoAdvisoryScraper) -> list[Advisory]:
     return advisories
 
 
-def scheduled_run_is_due(store: SupabaseAdvisoryStore) -> bool:
-    """Check the dashboard's enabled cadence against the last worker start."""
-    active_result = (
-        store.client.table("scraper_runs")
-        .select("id,status,created_at")
-        .in_("status", ["queued", "running"])
-        .limit(20)
-        .execute()
-    )
-    now = datetime.now(timezone.utc)
-    active_rows = getattr(active_result, "data", None) or []
-    for run in active_rows:
-        created_at = run.get("created_at")
-        if not created_at:
-            logging.info("An existing scraper run is active; skipping this check")
-            return False
-        started = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        if now - started > timedelta(minutes=45):
-            store.client.table("scraper_runs").update(
-                {
-                    "status": "failed",
-                    "finished_at": now.isoformat(),
-                    "message": "The worker did not finish within the expected time.",
-                }
-            ).eq("id", run["id"]).in_("status", ["queued", "running"]).execute()
-        else:
-            logging.info("An existing scraper run is active; skipping this check")
-            return False
-
-    result = (
-        store.client.table("scraper_settings")
-        .select("enabled,interval_minutes,last_run_at")
-        .eq("id", 1)
-        .limit(1)
-        .execute()
-    )
-    rows = getattr(result, "data", None) or []
-    if not rows:
-        raise RuntimeError("Missing scraper_settings row; run supabase_schema.sql")
-    settings = rows[0]
-    if not settings["enabled"]:
-        logging.info("Scheduled scraping is disabled in the dashboard")
-        return False
-    last_run_at = settings.get("last_run_at")
-    if not last_run_at:
-        return True
-    last_run = datetime.fromisoformat(last_run_at.replace("Z", "+00:00"))
-    interval_seconds = int(settings["interval_minutes"]) * 60
-    due = (now - last_run).total_seconds() >= interval_seconds
-    if not due:
-        logging.info("Scraper cadence has not elapsed; skipping this hourly check")
-    return due
-
-
 async def run_scrape_job(
     source: str,
     store: SupabaseAdvisoryStore | None = None,
     run_id: int | None = None,
 ) -> int:
-    """Run one scrape, replacing the snapshot and writing an operations record."""
-    if source not in {"manual", "scheduled"}:
-        raise ValueError("Unsupported scraper run source")
+    """Claim a run before opening Chromium and publish only complete snapshots."""
     store = store or SupabaseAdvisoryStore.from_environment()
-    started_at = datetime.now(timezone.utc)
-    if run_id is None:
-        start_result = (
-            store.client.table("scraper_runs")
-            .insert(
-                {
-                    "run_source": source,
-                    "status": "running",
-                    "started_at": started_at.isoformat(),
-                    "message": "Scrape is in progress.",
-                }
-            )
-            .select("id")
-            .execute()
-        )
-        start_rows = getattr(start_result, "data", None) or []
-        if not start_rows:
-            raise RuntimeError("Could not create a scraper run record")
-        run_id = start_rows[0]["id"]
-    else:
-        queued_update = (
-            store.client.table("scraper_runs")
-            .update(
-                {
-                    "status": "running",
-                    "started_at": started_at.isoformat(),
-                    "message": "Scrape is in progress.",
-                }
-            )
-            .eq("id", run_id)
-            .eq("status", "queued")
-            .select("id")
-            .execute()
-        )
-        if not (getattr(queued_update, "data", None) or []):
-            raise RuntimeError("Could not find the queued dashboard run record")
-    store.client.table("scraper_settings").update(
-        {"last_run_at": started_at.isoformat()}
-    ).eq("id", 1).execute()
+    claimed_id = store.rpc("claim_scraper_run", {"p_source": source, "p_run_id": run_id})
+    if claimed_id is None:
+        if source == "manual":
+            raise RuntimeError("The scraper is busy or the requested run is no longer queued.")
+        logging.info("Scheduled scrape is paused, already active, or not due.")
+        return 0
 
     try:
         async with async_playwright() as playwright:
             browser = await launch_browser(playwright)
-            context = None
             try:
                 context = await browser.new_context(user_agent=USER_AGENT)
-                scraper = CiscoAdvisoryScraper(context)
-                advisories = await scrape_once(scraper)
-                store.replace_all(advisories)
-            finally:
-                if context is not None:
+                try:
+                    advisories = await asyncio.wait_for(
+                        scrape_once(CiscoAdvisoryScraper(context)),
+                        timeout=SCRAPE_TIMEOUT_SECONDS,
+                    )
+                finally:
                     await context.close()
+            finally:
                 await browser.close()
-        finished_at = datetime.now(timezone.utc)
-        store.client.table("scraper_runs").update(
-            {
-                "status": "succeeded",
-                "finished_at": finished_at.isoformat(),
-                "advisory_count": len(advisories),
-                "message": "Scrape completed successfully.",
-            }
-        ).eq("id", run_id).execute()
-        logging.info("Stored %s advisories in Supabase", len(advisories))
-        return len(advisories)
+        count = store.publish(claimed_id, advisories)
     except Exception:
-        store.client.table("scraper_runs").update(
-            {
-                "status": "failed",
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "message": "Scrape failed. Review the worker log for details.",
-            }
-        ).eq("id", run_id).execute()
+        try:
+            store.client.table("scraper_runs").update(
+                {
+                    "status": "failed",
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "message": "Scrape failed. Review the worker log for details.",
+                }
+            ).eq("id", claimed_id).eq("status", "running").execute()
+        except Exception:
+            logging.exception("Could not record failure for scraper run %s", claimed_id)
         raise
+
+    logging.info("Scraper run %s published %s advisories", claimed_id, count)
+    return count
 
 
 async def run() -> None:
-    """Continuously replace Supabase rows with the latest advisory snapshot."""
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    """Check the saved schedule repeatedly for standalone installations."""
     store = SupabaseAdvisoryStore.from_environment()
-    async with async_playwright() as playwright:
-        browser = await launch_browser(playwright)
-        context = await browser.new_context(user_agent=USER_AGENT)
+    while True:
         try:
-            scraper = CiscoAdvisoryScraper(context)
-            while True:
-                try:
-                    advisories = await scrape_once(scraper)
-                    store.replace_all(advisories)
-                    logging.info("Stored %s advisories in Supabase", len(advisories))
-                except SupabaseSetupError:
-                    logging.exception("Supabase setup must be corrected before scraping can continue")
-                    raise
-                except Exception:
-                    logging.exception("Snapshot failed; the next cycle will retry")
-                logging.info(
-                    "Waiting %s seconds for the next scrape",
-                    SCRAPE_INTERVAL_SECONDS,
-                )
-                await asyncio.sleep(SCRAPE_INTERVAL_SECONDS)
-        finally:
-            await context.close()
-            await browser.close()
+            await run_scrape_job("scheduled", store)
+        except SupabaseSetupError:
+            raise
+        except Exception:
+            logging.exception("Snapshot failed; the next cycle will retry")
+        logging.info("Checking the scrape schedule again in %s seconds", SCRAPE_INTERVAL_SECONDS)
+        await asyncio.sleep(SCRAPE_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
@@ -531,11 +463,12 @@ if __name__ == "__main__":
         help="Run one scheduled scrape only when dashboard settings are due",
     )
     args = parser.parse_args()
+    if args.run_id is not None and not args.once:
+        parser.error("--run-id requires --once")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     if args.once:
         asyncio.run(run_scrape_job("manual", run_id=args.run_id))
     elif args.if_due:
-        store = SupabaseAdvisoryStore.from_environment()
-        if scheduled_run_is_due(store):
-            asyncio.run(run_scrape_job("scheduled", store))
+        asyncio.run(run_scrape_job("scheduled"))
     else:
         asyncio.run(run())

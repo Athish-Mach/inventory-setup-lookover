@@ -1,10 +1,10 @@
 # Signal Desk
 
-A Cisco advisory dashboard with a FastAPI backend, Supabase storage, and a responsive browser interface. The project is structured as a single Vercel deployment. The scraper in `main.py` writes advisory snapshots to the same Supabase table and records operational runs.
+A Cisco advisory dashboard with a FastAPI backend, Supabase storage, and a responsive browser interface. The web app is structured as a Vercel deployment, with GitHub Actions running the scraper. The feed holds the first four distinct advisories in Cisco's listing order and keeps the previous snapshot if a refresh fails. Every successful scrape stores the original Cisco links and the time the snapshot was saved.
 
 ## 1. Set up Supabase
 
-Open the SQL Editor in your Supabase project and run [`supabase_schema.sql`](supabase_schema.sql). It creates the advisory, account, session, product watchlist, schedule, run-history, and rate-limit tables, plus the restricted login-rate-limit function. The script can be rerun after updates.
+Open the SQL Editor in your Supabase project and run [`supabase_schema.sql`](supabase_schema.sql). It creates the advisory, account, session, product watchlist, schedule, run-history, and rate-limit tables. It also installs service-role-only functions for claiming runs, publishing snapshots, and reading feed status. The script can be rerun after updates.
 
 Create a Supabase **service role** key for the backend. Never put it in browser code or a `NEXT_PUBLIC_*` variable. The dashboard reads data only through FastAPI.
 
@@ -44,6 +44,8 @@ For a real deployment, set the production Supabase URL and service role key in l
 
 Import the repository in Vercel. FastAPI is exposed from the root `app.py`, while `public/` contains the static page assets. Add the three server environment variables above, then deploy. Vercel serves the page and assets from its CDN and routes API requests to FastAPI.
 
+When upgrading an existing installation, pause the old scheduled workflow, stop any standalone scraper, and let active jobs finish. Apply the updated schema before rolling out the app and workflow. After deployment, verify that `GET /api/ready` returns 200, sign in as an admin, and run an immediate scrape. Check that the run succeeds, the feed shows the saved time and Cisco source links, and an analyst can read the feed. Re-enable the scheduled workflow after these checks.
+
 ### Enable Operations
 
 The browser scraper runs in GitHub Actions, outside the Vercel request. Add these GitHub **Actions repository secrets** so the scheduled worker can reach Supabase:
@@ -62,18 +64,27 @@ For **Run scraper now**, add these server-side Vercel environment variables:
 
 For local app testing, put the same variables in `.env` and restart `python app.py`. Set `SCRAPER_GITHUB_REPOSITORY` to the actual `owner/repository`; create a fine-grained token restricted to that repository with **Actions: write** permission. Keep the token in `.env` or Vercel's server environment and never paste it into chat or browser code.
 
-When those GitHub dispatch variables are absent and the app is not running on Vercel, **Run scraper now** starts `main.py` locally in the background (Playwright + Chromium must be installed: `python -m playwright install chromium`). On Vercel, configure the GitHub token so manual runs can leave the serverless request. Scheduled cadence still relies on the hourly GitHub Actions check. Tracked products are a separate team watchlist and do not change which Cisco advisories the scraper retrieves. The dashboard refresh button reloads the latest completed snapshot.
+When those GitHub dispatch variables are absent and the app is not running on Vercel, **Run scraper now** starts `main.py` locally in the background (Playwright + Chromium must be installed: `python -m playwright install chromium`). On Vercel, configure the GitHub token so manual runs can leave the serverless request. Standalone installations can run `python main.py` to check the same saved schedule hourly. Supabase allows one active run across the dashboard, workflow, and standalone worker. A subsequent claim can recover a job that stayed queued or running for more than 45 minutes. Failed scrapes can retry on the next hourly check after that window.
+
+Tracked products are a separate team watchlist. The dashboard refresh button loads the latest saved snapshot, and visible dashboard tabs also refresh every minute. The feed displays the last successful snapshot timestamp and flags failed or overdue refreshes.
+
+Fixed-release badges come from Cisco table columns explicitly labeled as fixes. The detail view retains the broader fixed-software guidance and links to the original advisory for product-specific instructions.
 
 ## API
 
-- `GET /api/health` — health check
-- `POST /api/auth/login` — verify credentials, rate limited to 8 attempts per 15 minute window per username and client address
+- `GET /api/health` — web process liveness
+- `GET /api/ready` — returns 503 when authentication configuration or the Supabase feed schema is unavailable
+- `POST /api/auth/login` — verify credentials, rate limited to 8 attempts per 15 minute window both per account and per account/client address pair
 - `POST /api/auth/logout` — revoke the current session
 - `GET /api/auth/session` — current authenticated user
-- `GET /api/advisories?limit=100` — latest advisory records and aggregate counts; requires authentication
+- `GET /api/advisories?limit=100` — latest advisory records, counts, and feed freshness; requires authentication
 - `GET /api/admin/overview` — admin-only access check
 - `/api/admin/products` — add, list, pause/resume, and remove tracked products
 - `GET/PUT /api/admin/scraper/settings` — read or change cadence and automatic refresh
 - `POST /api/admin/scraper/run` — dispatch an immediate GitHub Actions scrape
 
 The API does not enable cross-origin access. It adds content security, framing, MIME sniffing, referrer, permissions, and cache-control headers. Supabase account/session tables have RLS enabled and no anon/authenticated access grants. As with any deployed application, security still depends on protecting the Vercel/Supabase secrets, applying provider updates, and keeping the demo account out of production.
+
+## Verification
+
+Run `python -m unittest discover -s tests -v` and `node --check public/assets/app.js` locally. The Application checks workflow also applies the schema twice to disposable PostgreSQL and runs [the database regression checks](tests/advisory_feed.sql), including rollback when an advisory insert fails.

@@ -17,6 +17,9 @@ let toastTimer;
 let operationsLoading = false;
 let operationsInitialized = false;
 let lastRunSnapshot = null;
+let advisoriesLoading = false;
+let scheduleDirty = false;
+let sessionVersion = 0;
 
 const escapeHTML = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -46,9 +49,27 @@ async function api(path, options = {}) {
 }
 
 function setView(isAuthenticated, username = "Admin", role = "analyst") {
+  sessionVersion += 1;
   loginView.hidden = isAuthenticated;
   appView.hidden = !isAuthenticated;
   if (!isAuthenticated) {
+    allAdvisories = [];
+    advisoriesLoading = false;
+    operationsLoading = false;
+    operationsInitialized = false;
+    lastRunSnapshot = null;
+    scheduleDirty = false;
+    fixedOnly = false;
+    showAll = false;
+    const filterButton = document.querySelector("#filter-button");
+    filterButton.classList.remove("active");
+    filterButton.setAttribute("aria-pressed", "false");
+    filterButton.title = "Show advisories with fixed releases";
+    document.querySelector("#refresh-button").classList.remove("loading");
+    searchInput.value = "";
+    if (detailDialog.open) detailDialog.close();
+    document.querySelector("#detail-content").replaceChildren();
+    tableBody.replaceChildren();
     document.querySelector("#overview-view").hidden = true;
     document.querySelector("#operations-view").hidden = true;
     document.querySelector("#password").value = "";
@@ -69,6 +90,7 @@ function setView(isAuthenticated, username = "Admin", role = "analyst") {
   document.querySelector("#profile-avatar").textContent = displayName.charAt(0).toUpperCase();
   const now = new Date();
   document.querySelector("#today-date").textContent = now.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }).toUpperCase();
+  renderFeedStatus("Checking feed", "Checking for a saved snapshot");
   loadAdvisories();
 }
 
@@ -108,7 +130,7 @@ function renderProducts() {
   document.querySelector("#list-title").textContent = "Products in your feed";
   document.querySelector("#list-count").textContent = String(products.length);
   document.querySelector(".section-description").textContent = "Products mentioned across the latest Cisco advisories.";
-  document.querySelector("thead").innerHTML = "<tr><th>PRODUCT</th><th>ADVISORY COVERAGE</th><th>STATUS</th><th>LAST UPDATED</th><th></th></tr>";
+  document.querySelector("thead").innerHTML = "<tr><th>PRODUCT</th><th>ADVISORY COVERAGE</th><th>STATUS</th><th>FETCHED</th><th></th></tr>";
   if (!products.length) {
     tableBody.innerHTML = '<tr><td colspan="5" class="empty-cell">No products match this search.</td></tr>';
   } else {
@@ -127,9 +149,9 @@ function renderAdvisories() {
   document.querySelector("#list-title").textContent = currentView === "advisories" ? "All advisories" : "Latest advisories";
   document.querySelector("#list-count").textContent = String(items.length);
   document.querySelector(".section-description").textContent = "Stay informed on the latest Cisco security updates.";
-  document.querySelector("thead").innerHTML = "<tr><th>ADVISORY</th><th>AFFECTED PRODUCTS</th><th>FIXED RELEASES</th><th>LAST UPDATED</th><th></th></tr>";
+  document.querySelector("thead").innerHTML = "<tr><th>ADVISORY</th><th>AFFECTED PRODUCTS</th><th>FIXED RELEASES</th><th>FETCHED</th><th></th></tr>";
   if (!shown.length) {
-    const message = allAdvisories.length ? "No advisories match your search." : "No advisory records were found. Run the scraper to populate this feed.";
+    const message = allAdvisories.length ? "No advisories match your search." : "No advisory snapshot is available yet.";
     tableBody.innerHTML = `<tr><td colspan="5" class="empty-cell">${message}</td></tr>`;
   } else {
     tableBody.innerHTML = shown.map((item) => {
@@ -185,11 +207,13 @@ function renderScraperRuns(runs) {
 async function loadOperations(quiet = false) {
   if (operationsLoading || currentRole !== "admin") return;
   operationsLoading = true;
+  const version = sessionVersion;
   try {
     const [products, scraper] = await Promise.all([
       api("/api/admin/products"),
       api("/api/admin/scraper/settings"),
     ]);
+    if (version !== sessionVersion) return;
     renderTrackedProducts(products.items || []);
     renderScraperRuns(scraper.runs || []);
     const latestRun = scraper.latest_run;
@@ -201,8 +225,10 @@ async function loadOperations(quiet = false) {
     lastRunSnapshot = latestRun ? { id: latestRun.id, status: latestRun.status } : lastRunSnapshot;
     operationsInitialized = true;
     if (scraper.settings) {
-      document.querySelector("#schedule-enabled").checked = Boolean(scraper.settings.enabled);
-      document.querySelector("#schedule-interval").value = String(scraper.settings.interval_minutes);
+      if (!scheduleDirty) {
+        document.querySelector("#schedule-enabled").checked = Boolean(scraper.settings.enabled);
+        document.querySelector("#schedule-interval").value = String(scraper.settings.interval_minutes);
+      }
       const state = document.querySelector("#schedule-state");
       state.textContent = scraper.settings.enabled ? "Automatic on" : "Paused";
       state.classList.toggle("paused", !scraper.settings.enabled);
@@ -225,6 +251,7 @@ async function loadOperations(quiet = false) {
         : "Queue an immediate scrape";
     }
   } catch (error) {
+    if (version !== sessionVersion) return;
     if (error.status === 401) {
       setView(false);
       return;
@@ -233,7 +260,7 @@ async function loadOperations(quiet = false) {
     document.querySelector("#tracked-products").innerHTML = `<tr><td colspan="5" class="empty-cell">${escapeHTML(error.message)}</td></tr>`;
     document.querySelector("#scraper-runs").innerHTML = `<div class="ops-empty">${escapeHTML(error.message)}</div>`;
   } finally {
-    operationsLoading = false;
+    if (version === sessionVersion) operationsLoading = false;
   }
 }
 
@@ -242,29 +269,49 @@ function render() {
   else renderAdvisories();
 }
 
+function renderFeedStatus(state, detail) {
+  document.querySelector("#feed-state").textContent = state;
+  document.querySelector("#last-sync").textContent = detail;
+}
+
 async function loadAdvisories(showToast = false) {
+  if (advisoriesLoading) return;
+  advisoriesLoading = true;
+  const version = sessionVersion;
   const refreshButton = document.querySelector("#refresh-button");
   refreshButton.classList.add("loading");
   try {
     const data = await api("/api/advisories?limit=500");
+    if (version !== sessionVersion) return;
     allAdvisories = Array.isArray(data.items) ? data.items : [];
     document.querySelector("#metric-advisories").textContent = String(data.total ?? allAdvisories.length);
     document.querySelector("#metric-products").textContent = String(data.products ?? "—");
     document.querySelector("#metric-releases").textContent = String(data.fixed_releases ?? "—");
     document.querySelector("#nav-count").textContent = String(data.total ?? allAdvisories.length);
-    document.querySelector("#last-sync").textContent = allAdvisories.length ? `Feed connected · ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "Waiting for the first advisory snapshot";
+    const fetchedAt = data.fetched_at ? new Date(data.fetched_at).toLocaleString() : "";
+    let state = fetchedAt ? "Snapshot available" : "Awaiting first snapshot";
+    if (data.schedule_enabled === false) state = "Schedule paused";
+    if (data.stale) state = "Refresh overdue";
+    if (data.latest_run_status === "failed") state = "Last scrape failed";
+    renderFeedStatus(state, fetchedAt ? `Saved ${fetchedAt}` : "No snapshot saved yet");
     render();
     if (showToast) notify("Advisory feed refreshed.");
   } catch (error) {
+    if (version !== sessionVersion) return;
     if (error.status === 401) {
       setView(false);
       return;
     }
-    tableBody.innerHTML = `<tr><td colspan="5" class="empty-cell">${escapeHTML(error.message)}</td></tr>`;
-    document.querySelector("#last-sync").textContent = "Unable to reach the data source";
+    if (!allAdvisories.length) {
+      tableBody.innerHTML = `<tr><td colspan="5" class="empty-cell">${escapeHTML(error.message)}</td></tr>`;
+    }
+    renderFeedStatus("Feed unavailable", allAdvisories.length ? "Showing the previously loaded snapshot" : "Unable to reach the data source");
     if (showToast) notify("Refresh failed. Please try again.");
   } finally {
-    refreshButton.classList.remove("loading");
+    if (version === sessionVersion) {
+      advisoriesLoading = false;
+      refreshButton.classList.remove("loading");
+    }
   }
 }
 
@@ -301,10 +348,18 @@ document.querySelector(".password-toggle").addEventListener("click", (event) => 
   event.currentTarget.setAttribute("aria-label", visible ? "Hide password" : "Show password");
 });
 
-document.querySelector("#sign-out").addEventListener("click", async () => {
-  try { await api("/api/auth/logout", { method: "POST" }); } catch { /* clear the UI even if the session has expired */ }
-  allAdvisories = [];
-  setView(false);
+document.querySelector("#sign-out").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+    setView(false);
+  } catch (error) {
+    if (error.status === 401) setView(false);
+    else notify("Sign-out could not be confirmed. Try again.");
+  } finally {
+    button.disabled = false;
+  }
 });
 
 document.querySelector("#refresh-button").addEventListener("click", () => loadAdvisories(true));
@@ -350,6 +405,10 @@ tableBody.addEventListener("click", (event) => {
   }
 });
 
+document.querySelector("#schedule-form").addEventListener("change", () => {
+  scheduleDirty = true;
+});
+
 document.querySelector("#schedule-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = document.querySelector("#save-schedule");
@@ -362,6 +421,7 @@ document.querySelector("#schedule-form").addEventListener("submit", async (event
         interval_minutes: Number(document.querySelector("#schedule-interval").value),
       }),
     });
+    scheduleDirty = false;
     document.querySelector("#schedule-feedback").textContent = "Schedule saved.";
     document.querySelector("#schedule-feedback").hidden = false;
     await loadOperations(true);
@@ -432,14 +492,28 @@ document.querySelector("#tracked-products").addEventListener("click", async (eve
 });
 
 setInterval(() => {
-  if (!appView.hidden && currentView === "operations") loadOperations(true);
+  if (!appView.hidden && !document.hidden && currentView === "operations") loadOperations(true);
 }, 20000);
+
+setInterval(() => {
+  if (!appView.hidden && !document.hidden) loadAdvisories();
+}, 60000);
+
+function ciscoSourceLink(raw) {
+  try {
+    const url = new URL(raw);
+    if (url.protocol === "https:" && (url.hostname === "cisco.com" || url.hostname.endsWith(".cisco.com"))) {
+      return `<p><a href="${escapeHTML(url.href)}" target="_blank" rel="noopener noreferrer">View original Cisco advisory</a></p>`;
+    }
+  } catch { /* Older snapshots may have no source link. */ }
+  return "";
+}
 
 function openAdvisory(id) {
   const item = allAdvisories.find((advisory) => Number(advisory.id) === id);
   if (!item) return;
   const list = (items) => items.length ? `<ul>${items.map((value) => `<li>${escapeHTML(value)}</li>`).join("")}</ul>` : "<p>Not specified in this advisory.</p>";
-  document.querySelector("#detail-content").innerHTML = `<div class="detail-eyebrow">CISCO SECURITY ADVISORY</div><h2>${escapeHTML(item.name || "Cisco security advisory")}</h2><div class="detail-meta">Published ${escapeHTML(formatDate(item.created_at))} <span class="cell-dot"></span> ${advisoryProducts(item).length} affected products</div><section class="detail-block"><h3>Summary</h3><p>${escapeHTML(item.summary || "No summary was provided.")}</p></section><section class="detail-block"><h3>Affected products</h3>${list(advisoryProducts(item))}</section><section class="detail-block"><h3>Fixed releases</h3>${list(advisoryReleases(item))}</section><section class="detail-block"><h3>Workarounds</h3><p>${escapeHTML(item.workarounds || "No workaround details were provided.")}</p></section><section class="detail-block"><h3>Fixed software</h3><p>${escapeHTML(item.fixed_software || "No fixed software details were provided.")}</p></section>`;
+  document.querySelector("#detail-content").innerHTML = `<div class="detail-eyebrow">CISCO SECURITY ADVISORY</div><h2>${escapeHTML(item.name || "Cisco security advisory")}</h2><div class="detail-meta">Fetched ${escapeHTML(formatDate(item.created_at))} <span class="cell-dot"></span> ${advisoryProducts(item).length} affected products</div>${ciscoSourceLink(item.source_url)}<section class="detail-block"><h3>Summary</h3><p>${escapeHTML(item.summary || "No summary was provided.")}</p></section><section class="detail-block"><h3>Affected products</h3>${list(advisoryProducts(item))}</section><section class="detail-block"><h3>Fixed releases</h3>${list(advisoryReleases(item))}</section><section class="detail-block"><h3>Workarounds</h3><p>${escapeHTML(item.workarounds || "No workaround details were provided.")}</p></section><section class="detail-block"><h3>Fixed software</h3><p>${escapeHTML(item.fixed_software || "No fixed software details were provided.")}</p></section>`;
   detailDialog.showModal();
 }
 

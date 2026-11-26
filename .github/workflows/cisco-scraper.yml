@@ -20,10 +20,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: cisco-advisory-scraper
-  cancel-in-progress: false
-
 jobs:
   scrape:
     runs-on: ubuntu-latest

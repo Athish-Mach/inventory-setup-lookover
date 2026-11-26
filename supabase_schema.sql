@@ -1,3 +1,5 @@
+begin;
+
 create table if not exists public.cisco_security_advisories (
     id bigint generated always as identity primary key,
     name text not null,
@@ -14,7 +16,8 @@ alter table public.cisco_security_advisories force row level security;
 
 -- Safe to rerun against an existing advisory table created by an earlier version.
 alter table public.cisco_security_advisories
-    add column if not exists created_at timestamptz not null default now();
+    add column if not exists created_at timestamptz not null default now(),
+    add column if not exists source_url text;
 
 revoke all on public.cisco_security_advisories from public, anon, authenticated;
 grant select, insert, update, delete on public.cisco_security_advisories to service_role;
@@ -91,6 +94,10 @@ create table if not exists public.scraper_runs (
 
 create index if not exists scraper_runs_created_at_idx
     on public.scraper_runs (created_at desc);
+create index if not exists scraper_runs_active_idx
+    on public.scraper_runs (status) where status in ('queued', 'running');
+create index if not exists scraper_runs_failed_start_idx
+    on public.scraper_runs (started_at) where status = 'failed';
 
 alter table public.app_users enable row level security;
 alter table public.app_users force row level security;
@@ -164,3 +171,157 @@ $$;
 
 revoke all on function public.consume_login_attempt(text, integer, integer) from public, anon, authenticated;
 grant execute on function public.consume_login_attempt(text, integer, integer) to service_role;
+
+-- Serialize scheduling, manual queueing, and worker claims on the settings row.
+create or replace function public.claim_scraper_run(
+    p_source text,
+    p_run_id bigint default null,
+    p_requested_by text default null
+)
+returns bigint
+language plpgsql
+set search_path = ''
+as $$
+declare
+    settings public.scraper_settings%rowtype;
+    claimed_id bigint;
+    current_time_utc timestamptz := statement_timestamp();
+begin
+    if p_source is null or p_source not in ('manual', 'scheduled')
+        or (p_source = 'scheduled' and (p_run_id is not null or p_requested_by is not null))
+        or (p_run_id is not null and p_requested_by is not null) then
+        raise exception 'Invalid scraper claim';
+    end if;
+
+    select * into strict settings from public.scraper_settings where id = 1 for update;
+
+    update public.scraper_runs
+    set status = 'failed', finished_at = current_time_utc,
+        message = 'The worker did not finish within the expected time.'
+    where status in ('queued', 'running')
+        and coalesce(started_at, created_at) < current_time_utc - interval '45 minutes';
+
+    if p_run_id is not null then
+        update public.scraper_runs
+        set status = 'running', started_at = current_time_utc, message = 'Scrape is in progress.'
+        where id = p_run_id and status = 'queued' and run_source = 'manual'
+            and not exists (select 1 from public.scraper_runs where status = 'running')
+        returning id into claimed_id;
+    else
+        if exists (select 1 from public.scraper_runs where status in ('queued', 'running')) then
+            return null;
+        end if;
+
+        if p_source = 'scheduled' and (
+            not settings.enabled or settings.last_run_at + case
+                when exists (select 1 from public.scraper_runs where status = 'failed'
+                    and started_at = settings.last_run_at) then interval '45 minutes'
+                else make_interval(mins => settings.interval_minutes)
+            end > current_time_utc
+        ) then
+            return null;
+        end if;
+
+        insert into public.scraper_runs (run_source, status, requested_by, started_at, message)
+        values (p_source,
+            case when p_requested_by is null then 'running' else 'queued' end,
+            p_requested_by,
+            case when p_requested_by is null then current_time_utc end,
+            case when p_requested_by is null then 'Scrape is in progress.' else 'Queued from the dashboard.' end)
+        returning id into claimed_id;
+    end if;
+
+    if claimed_id is not null and p_requested_by is null then
+        update public.scraper_settings set last_run_at = current_time_utc where id = 1;
+    end if;
+    return claimed_id;
+end;
+$$;
+
+-- An unsuccessful publication rolls back both the replacement and the run update.
+create or replace function public.publish_advisory_snapshot(p_run_id bigint, p_items jsonb)
+returns integer
+language plpgsql
+set search_path = ''
+as $$
+declare
+    item_count integer;
+    finished timestamptz := statement_timestamp();
+begin
+    if p_items is null or jsonb_typeof(p_items) <> 'array' then
+        raise exception 'Expected an advisory array';
+    end if;
+    item_count := jsonb_array_length(p_items);
+    if item_count = 0 then
+        raise exception 'Cannot publish an empty advisory snapshot';
+    end if;
+    if exists (
+        select 1 from jsonb_array_elements(p_items) as item
+        where coalesce(btrim(item->>'name'), '') = ''
+            or coalesce(btrim(item->>'summary'), '') = ''
+            or jsonb_typeof(item->'affected_products') is distinct from 'array'
+            or jsonb_typeof(item->'fixed_releases') is distinct from 'array'
+    ) then
+        raise exception 'Cannot publish an incomplete advisory snapshot';
+    end if;
+
+    update public.scraper_runs
+    set status = 'succeeded', finished_at = finished, advisory_count = item_count,
+        message = 'Scrape completed successfully.'
+    where id = p_run_id and status = 'running'
+        and started_at >= finished - interval '45 minutes';
+    if not found then
+        raise exception 'Scraper run is no longer active';
+    end if;
+
+    delete from public.cisco_security_advisories;
+    insert into public.cisco_security_advisories
+        (name, summary, workarounds, affected_products, fixed_software, fixed_releases, source_url, created_at)
+    select name, summary, workarounds, affected_products, fixed_software, fixed_releases, source_url, finished
+    from jsonb_to_recordset(p_items) as advisory(
+        name text, summary text, workarounds text, affected_products jsonb,
+        fixed_software text, fixed_releases jsonb, source_url text
+    );
+    return item_count;
+end;
+$$;
+
+-- Read rows and feed metadata from a single database snapshot.
+create or replace function public.read_advisory_feed(p_limit integer)
+returns jsonb
+language sql stable
+set search_path = ''
+as $$
+    with feed as (
+        select id, name, summary, workarounds, affected_products, fixed_software,
+            fixed_releases, source_url, created_at
+        from public.cisco_security_advisories
+        order by created_at desc, id asc
+        limit least(greatest(p_limit, 1), 500)
+    ), snapshot as (
+        select
+            coalesce(jsonb_agg(to_jsonb(feed) order by created_at desc, id asc), '[]'::jsonb) as items,
+            max(created_at) as fetched_at
+        from feed
+    )
+    select jsonb_build_object(
+        'items', snapshot.items,
+        'total', (select count(*) from public.cisco_security_advisories),
+        'fetched_at', snapshot.fetched_at,
+        'schedule_enabled', settings.enabled,
+        'stale', settings.enabled and coalesce(snapshot.fetched_at <
+            statement_timestamp() - make_interval(mins => settings.interval_minutes + 75), false),
+        'latest_run_status', (select status from public.scraper_runs order by id desc limit 1)
+    )
+    from snapshot cross join public.scraper_settings as settings where settings.id = 1;
+$$;
+
+revoke all on function public.claim_scraper_run(text, bigint, text) from public, anon, authenticated;
+revoke all on function public.publish_advisory_snapshot(bigint, jsonb) from public, anon, authenticated;
+revoke all on function public.read_advisory_feed(integer) from public, anon, authenticated;
+grant execute on function public.claim_scraper_run(text, bigint, text) to service_role;
+grant execute on function public.publish_advisory_snapshot(bigint, jsonb) to service_role;
+grant execute on function public.read_advisory_feed(integer) to service_role;
+
+notify pgrst, 'reload schema';
+commit;
