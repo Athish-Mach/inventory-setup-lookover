@@ -274,7 +274,8 @@ begin
         raise exception 'Scraper run is no longer active';
     end if;
 
-    delete from public.cisco_security_advisories;
+    -- Supabase can require an explicit predicate on deletes, including inside RPCs.
+    delete from public.cisco_security_advisories where id is not null;
     insert into public.cisco_security_advisories
         (name, summary, workarounds, affected_products, fixed_software, fixed_releases, source_url, created_at)
     select name, summary, workarounds, affected_products, fixed_software, fixed_releases, source_url, finished
