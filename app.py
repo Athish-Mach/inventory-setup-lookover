@@ -340,12 +340,14 @@ async def security_middleware(request: Request, call_next: Any) -> Response:
     return response
 
 
-@app.get("/", include_in_schema=False)
-async def home() -> FileResponse:
-    return FileResponse(PUBLIC / "index.html", media_type="text/html")
+# Vercel serves public/ separately, so the function may ship without these files.
+if (PUBLIC / "index.html").is_file():
+    @app.get("/", include_in_schema=False)
+    async def home() -> FileResponse:
+        return FileResponse(PUBLIC / "index.html", media_type="text/html")
 
-
-app.mount("/assets", StaticFiles(directory=PUBLIC / "assets"), name="assets")
+if (PUBLIC / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=PUBLIC / "assets"), name="assets")
 
 
 @app.get("/api/health")

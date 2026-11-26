@@ -1,5 +1,10 @@
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import httpx
@@ -21,6 +26,24 @@ class AdvisoryApiTests(unittest.TestCase):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 401)
                 self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_function_bundle_starts_without_static_files(self):
+        with tempfile.TemporaryDirectory() as bundle:
+            for filename in ("app.py", "supabase_client.py"):
+                shutil.copyfile(app.ROOT / filename, Path(bundle) / filename)
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from app import app\n"
+                    "from fastapi.testclient import TestClient\n"
+                    "with TestClient(app) as client:\n"
+                    "    assert client.get('/api/health').status_code == 200\n",
+                ],
+                cwd=bundle,
+                check=True,
+                timeout=10,
+            )
 
     def test_analyst_reads_feed_but_cannot_queue_a_scrape(self):
         app.app.dependency_overrides[app.current_user] = lambda: {"role": "analyst"}
